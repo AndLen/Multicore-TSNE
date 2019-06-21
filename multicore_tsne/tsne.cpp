@@ -596,27 +596,114 @@ double TSNE<treeT, dist_fn>::randn() {
 
 extern "C"
 {
-    #ifdef _WIN32
-    __declspec(dllexport)
-    #endif
-    extern void tsne_run_double(double* X, int N, int D, double* Y,
-                                int no_dims = 2, double perplexity = 30, double theta = .5,
-                                int num_threads = 1, int max_iter = 1000, int n_iter_early_exag = 250,
-                                int random_state = -1, bool init_from_Y = false, int verbose = 0,
-                                double early_exaggeration = 12, double learning_rate = 200,
-                                double *final_error = NULL, int distance = 1)
-    {
-        if (verbose)
-            fprintf(stderr, "Performing t-SNE using %d cores.\n", NUM_THREADS(num_threads));
-        if (distance == 0) {
-            TSNE<SplitTree, euclidean_distance> tsne;
-            tsne.run(X, N, D, Y, no_dims, perplexity, theta, num_threads, max_iter, n_iter_early_exag,
-                     random_state, init_from_Y, verbose, early_exaggeration, learning_rate, final_error);
-        }
-        else {
-            TSNE<SplitTree, euclidean_distance_squared> tsne;
-            tsne.run(X, N, D, Y, no_dims, perplexity, theta, num_threads, max_iter, n_iter_early_exag,
-                     random_state, init_from_Y, verbose, early_exaggeration, learning_rate, final_error);
-        }
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
+extern void tsne_run_double(double *X, int N, int D, double *Y,
+                            int no_dims = 2, double perplexity = 30, double theta = .5,
+                            int num_threads = 1, int max_iter = 1000, int n_iter_early_exag = 250,
+                            int random_state = -1, bool init_from_Y = false, int verbose = 0,
+                            double early_exaggeration = 12, double learning_rate = 200,
+                            double *final_error = NULL, int distance = 1) {
+    if (verbose)
+        fprintf(stderr, "Performing t-SNE using %d cores.\n", NUM_THREADS(num_threads));
+    if (distance == 0) {
+        TSNE<SplitTree, euclidean_distance> tsne;
+        tsne.run(X, N, D, Y, no_dims, perplexity, theta, num_threads, max_iter, n_iter_early_exag,
+                 random_state, init_from_Y, verbose, early_exaggeration, learning_rate, final_error);
+    } else {
+        TSNE<SplitTree, euclidean_distance_squared> tsne;
+        tsne.run(X, N, D, Y, no_dims, perplexity, theta, num_threads, max_iter, n_iter_early_exag,
+                 random_state, init_from_Y, verbose, early_exaggeration, learning_rate, final_error);
     }
+}
+
+extern void evaluateError(int *row_P, int *col_P, double *val_P, double *Y, int N, double *error, int no_dims = 2,
+                            double theta = .5) {
+    TSNE<SplitTree, euclidean_distance_squared> tsne;
+    *error = tsne.evaluateError(row_P, col_P, val_P, Y, N, no_dims, theta);
+}
+extern void compute_P(double *X, int N, int D, int *row_P, int *col_P, double *val_P, int no_dims = 2,
+                      double perplexity = 30, double theta = .5, int num_threads = 1, int verbose = 0) {
+    if (verbose)
+        fprintf(stderr, "Performing t-SNE using %d cores.\n", NUM_THREADS(num_threads));
+
+    TSNE<SplitTree, euclidean_distance_squared> tsne;
+
+
+    if (N - 1 < 3 * perplexity) {
+        perplexity = (N - 1) / 3;
+        if (verbose)
+            fprintf(stderr, "Perplexity too large for the number of data points! Adjusting ...\n");
+    }
+
+#ifdef _OPENMP
+    omp_set_num_threads(NUM_THREADS(num_threads));
+#if _OPENMP >= 200805
+    omp_set_schedule(omp_sched_guided, 0);
+#endif
+#endif
+
+    /*
+        ======================
+            Step 1
+        ======================
+    */
+
+    if (verbose)
+        fprintf(stderr, "Using no_dims = %d, perplexity = %f, and theta = %f\n", no_dims, perplexity, theta);
+
+    // Set learning parameters
+    time_t start, end;
+
+
+    // Allocate some memory
+    double *dY = (double *) malloc(N * no_dims * sizeof(double));
+    double *uY = (double *) calloc(N * no_dims, sizeof(double));
+    double *gains = (double *) malloc(N * no_dims * sizeof(double));
+    if (dY == NULL || uY == NULL || gains == NULL) {
+        fprintf(stderr, "Memory allocation failed!\n");
+        exit(1);
+    }
+    for (int i = 0; i < N * no_dims; i++) {
+        gains[i] = 1.0;
+    }
+
+    // Normalize input data (to prevent numerical problems)
+    if (verbose)
+        fprintf(stderr, "Computing input similarities...\n");
+
+    start = time(0);
+    tsne.zeroMean(X, N, D);
+    double max_X = .0;
+    for (int i = 0; i < N * D; i++) {
+        if (X[i] > max_X) max_X = X[i];
+    }
+    for (int i = 0; i < N * D; i++) {
+        X[i] /= max_X;
+    }
+
+    // Compute input similarities
+
+
+    // Compute asymmetric pairwise input similarities
+    tsne.computeGaussianPerplexity(X, N, D, &row_P, &col_P, &val_P, perplexity, (int) (3 * perplexity), verbose);
+
+    // Symmetrize input similarities
+    tsne.symmetrizeMatrix(&row_P, &col_P, &val_P, N);
+    double sum_P = .0;
+    for (int i = 0; i < row_P[N]; i++) {
+        sum_P += val_P[i];
+    }
+    for (int i = 0; i < row_P[N]; i++) {
+        val_P[i] /= sum_P;
+    }
+
+    end = time(0);
+    if (verbose)
+        fprintf(stderr, "Done in %4.2f seconds (sparsity = %f)!\nLearning embedding...\n", (float) (end - start),
+                (double) row_P[N] / ((double) N * (double) N));
+
+
+}
 }
